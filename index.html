@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>工作時數追蹤器</title>
+  
+  <!-- 引入 Tailwind CSS (負責美美的排版) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- 引入 React 與 ReactDOM (負責核心運作機制) -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- 引入 Babel (這就是內建的魔法咖啡機，負責把下方 React 語法轉給瀏覽器看) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <!-- 這是 App 會渲染出來的地方 -->
+  <div id="root"></div>
+
+  <!-- 這裡開始是你的 React 程式碼 -->
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    function App() {
+      // 任務狀態管理：一打開網頁就去 localStorage 找存檔
+      const [tasks, setTasks] = useState(() => {
+        const savedTasks = localStorage.getItem('myWorkTasks');
+        if (savedTasks) {
+          return JSON.parse(savedTasks);
+        }
+        return [];
+      });
+      
+      const [newTaskName, setNewTaskName] = useState('');
+      const [now, setNow] = useState(Date.now());
+
+      // 存檔機制：只要 tasks 有變動，就自動存入瀏覽器的 localStorage
+      useEffect(() => {
+        localStorage.setItem('myWorkTasks', JSON.stringify(tasks));
+      }, [tasks]);
+
+      // 畫面更新器：每秒更新一次「現在時間」
+      useEffect(() => {
+        const timer = setInterval(() => {
+          setNow(Date.now());
+        }, 1000);
+        return () => clearInterval(timer);
+      }, []);
+
+      const calculateTaskSeconds = (task) => {
+        let total = task.accumulatedSeconds || 0;
+        if (task.status === 'running' && task.lastStartTime) {
+          total += Math.floor((now - task.lastStartTime) / 1000);
+        }
+        return total;
+      };
+
+      const addTask = (e) => {
+        e.preventDefault();
+        if (!newTaskName.trim()) return;
+        const newTask = {
+          id: Date.now().toString(),
+          name: newTaskName,
+          status: 'idle', 
+          accumulatedSeconds: 0,
+          lastStartTime: null,
+        };
+        setTasks([...tasks, newTask]);
+        setNewTaskName('');
+      };
+
+      const startTask = (targetId) => {
+        const currentTime = Date.now();
+        setTasks((prevTasks) =>
+          prevTasks.map((task) => {
+            if (task.id === targetId) {
+              return { ...task, status: 'running', lastStartTime: currentTime };
+            }
+            if (task.status === 'running') {
+              const sessionSeconds = Math.floor((currentTime - task.lastStartTime) / 1000);
+              return { 
+                ...task, 
+                status: 'paused', 
+                accumulatedSeconds: (task.accumulatedSeconds || 0) + sessionSeconds,
+                lastStartTime: null
+              };
+            }
+            return task;
+          })
+        );
+      };
+
+      const pauseTask = (id) => {
+        const currentTime = Date.now();
+        setTasks((prevTasks) =>
+          prevTasks.map((task) => {
+            if (task.id === id && task.status === 'running') {
+              const sessionSeconds = Math.floor((currentTime - task.lastStartTime) / 1000);
+              return { 
+                ...task, 
+                status: 'paused', 
+                accumulatedSeconds: (task.accumulatedSeconds || 0) + sessionSeconds,
+                lastStartTime: null
+              };
+            }
+            return task;
+          })
+        );
+      };
+
+      const completeTask = (id) => {
+        const currentTime = Date.now();
+        setTasks((prevTasks) =>
+          prevTasks.map((task) => {
+            if (task.id === id) {
+              let finalSeconds = task.accumulatedSeconds || 0;
+              if (task.status === 'running') {
+                finalSeconds += Math.floor((currentTime - task.lastStartTime) / 1000);
+              }
+              return { 
+                ...task, 
+                status: 'completed', 
+                accumulatedSeconds: finalSeconds,
+                lastStartTime: null
+              };
+            }
+            return task;
+          })
+        );
+      };
+
+      const restartTask = (id) => {
+        setTasks((prevTasks) =>
+          prevTasks.map((task) =>
+            task.id === id ? { ...task, status: 'paused' } : task
+          )
+        );
+      };
+
+      const formatTime = (totalSeconds) => {
+        const h = Math.floor(totalSeconds / 3600);
+        const m = Math.floor((totalSeconds % 3600) / 60);
+        const s = totalSeconds % 60;
+        return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+      };
+
+      const totalWorkSeconds = tasks.reduce((acc, task) => acc + calculateTaskSeconds(task), 0);
+
+      return (
+        <div className="min-h-screen bg-gray-100 p-4 md:p-8 font-sans">
+          <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-xl overflow-hidden">
+            
+            {/* 頂部標題 */}
+            <div className="bg-blue-600 p-6 text-white text-center">
+              <h1 className="text-2xl font-bold mb-2 flex items-center justify-center gap-2">
+                ⏱️ 我的工作日誌中控台
+              </h1>
+              <p className="text-blue-100 mb-4">重新整理、關閉網頁都不怕！資料已自動在地端儲存</p>
+              <div className="bg-blue-800/50 rounded-lg py-3 px-6 inline-block">
+                <span className="text-sm text-blue-200 block mb-1">今日累積總工時</span>
+                <span className="text-3xl font-mono font-bold tracking-wider">{formatTime(totalWorkSeconds)}</span>
+              </div>
+            </div>
+
+            <div className="p-6">
+              {/* 新增任務區 */}
+              <form onSubmit={addTask} className="flex gap-2 mb-8">
+                <input
+                  type="text"
+                  value={newTaskName}
+                  onChange={(e) => setNewTaskName(e.target.value)}
+                  placeholder="輸入新的工作項目 (例如: 回覆信件...)"
+                  className="flex-1 border-2 border-gray-200 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 transition-colors text-lg"
+                />
+                <button
+                  type="submit"
+                  disabled={!newTaskName.trim()}
+                  className="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 font-bold transition-colors"
+                >
+                  ➕ <span className="hidden sm:inline">新增</span>
+                </button>
+              </form>
+
+              {/* 任務列表 */}
+              <div className="space-y-4">
+                {tasks.length === 0 ? (
+                  <div className="text-center py-12 text-gray-400 border-2 border-dashed border-gray-200 rounded-xl">
+                    <p>目前沒有任務，請在上方輸入並新增！</p>
+                  </div>
+                ) : (
+                  tasks.map((task) => {
+                    const currentTaskSeconds = calculateTaskSeconds(task);
+                    
+                    return (
+                      <div
+                        key={task.id}
+                        className={`relative p-4 rounded-xl border-2 transition-all duration-300 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 ${
+                          task.status === 'running'
+                            ? 'border-blue-500 bg-blue-50 shadow-md transform scale-[1.01]'
+                            : task.status === 'completed'
+                            ? 'border-gray-200 bg-gray-50 opacity-70'
+                            : 'border-gray-200 bg-white hover:border-blue-300'
+                        }`}
+                      >
+                        <div className="flex-1 truncate w-full">
+                          <h3 className={`text-lg font-bold truncate ${task.status === 'completed' ? 'line-through text-gray-500' : 'text-gray-800'}`}>
+                            {task.name}
+                          </h3>
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className={`text-xs font-bold px-2 py-1 rounded-full ${
+                              task.status === 'running' ? 'bg-blue-200 text-blue-700 animate-pulse' :
+                              task.status === 'paused' ? 'bg-amber-100 text-amber-700' :
+                              task.status === 'completed' ? 'bg-gray-200 text-gray-600' :
+                              'bg-gray-100 text-gray-500'
+                            }`}>
+                              {task.status === 'running' ? '⏱️ 進行中' :
+                               task.status === 'paused' ? '⏸️ 已暫停' :
+                               task.status === 'completed' ? '✅ 已完成' : '未開始'}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between w-full sm:w-auto gap-6">
+                          <div className="text-2xl font-mono font-bold text-gray-700 w-28 text-right tracking-tight">
+                            {formatTime(currentTaskSeconds)}
+                          </div>
+                          
+                          <div className="flex items-center gap-2">
+                            {task.status !== 'completed' ? (
+                              <>
+                                {task.status === 'running' ? (
+                                  <button onClick={() => pauseTask(task.id)} className="p-3 bg-amber-100 text-amber-600 hover:bg-amber-200 rounded-full" title="暫停">
+                                    ⏸️
+                                  </button>
+                                ) : (
+                                  <button onClick={() => startTask(task.id)} className="p-3 bg-blue-100 text-blue-600 hover:bg-blue-200 rounded-full" title="開始/繼續">
+                                    ▶️
+                                  </button>
+                                )}
+                                <button onClick={() => completeTask(task.id)} className="p-3 bg-green-100 text-green-600 hover:bg-green-200 rounded-full" title="標記完成">
+                                  ✅
+                                </button>
+                              </>
+                            ) : (
+                              <button onClick={() => restartTask(task.id)} className="p-3 bg-gray-200 text-gray-600 hover:bg-gray-300 rounded-full flex items-center gap-1 text-sm font-bold pr-4">
+                                🔄 退回修改
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+            
+            <div className="bg-gray-50 p-4 text-center text-gray-400 text-sm border-t border-gray-100">
+              部署於 GitHub Pages！(資料存在您的瀏覽器中，重新整理不會遺失)
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // 啟動 React 應用
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
