@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>工作時數追蹤器</title>
+  
+  <!-- 引入 Tailwind CSS (負責美美的排版) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- 引入 React 與 ReactDOM (負責核心運作機制) -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- 引入 Babel (負責把下方 React 語法轉給瀏覽器看) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    function App() {
+      // 任務狀態管理：一打開網頁就去 localStorage 找存檔
+      const [tasks, setTasks] = useState(() => {
+        const savedTasks = localStorage.getItem('myWorkTasks');
+        if (savedTasks) {
+          return JSON.parse(savedTasks);
+        }
+        return [];
+      });
+      
+      const [newTaskName, setNewTaskName] = useState('');
+      const [now, setNow] = useState(Date.now());
+
+      // 新增：儲存 Google Sheet 的專屬網址
+      const [sheetUrl, setSheetUrl] = useState(() => {
+        return localStorage.getItem('myGoogleSheetUrl') || '';
+      });
+      const [isSyncing, setIsSyncing] = useState(false);
+
+      // 新增：為了讓「夜間警衛 (setInterval)」能抓到最新的任務狀態，我們使用 useRef
+      const tasksRef = React.useRef(tasks);
+      useEffect(() => { tasksRef.current = tasks; }, [tasks]);
+      
+      const sheetUrlRef = React.useRef(sheetUrl);
+      useEffect(() => { sheetUrlRef.current = sheetUrl; }, [sheetUrl]);
+
+      // 存檔機制：只要 tasks 或 sheetUrl 有變動，就自動存入瀏覽器的 localStorage
+      useEffect(() => {
+        localStorage.setItem('myWorkTasks', JSON.stringify(tasks));
+      }, [tasks]);
+
+      useEffect(() => {
+        localStorage.setItem('myGoogleSheetUrl', sheetUrl);
+      }, [sheetUrl]);
+
+      // 畫面更新器：每秒更新一次「現在時間」
+      useEffect(() => {
+        const timer = setInterval(() => {
+          setNow(Date.now());
+        }, 1000);
+        return () => clearInterval(timer);
+      }, []);
+
+      // 新增：大樓夜間警衛 (防呆與自動化機制)
+      useEffect(() => {
+        const watchman = setInterval(async () => {
+          const currentTasks = tasksRef.current;
+          if (currentTasks.length === 0) return; // 沒有任務就不做事
+
+          const nowTime = new Date();
+          const hour = nowTime.getHours();
+          const todayStr = nowTime.toLocaleDateString('zh-TW');
+
+          // 1. 每天 17:00 後自動同步 (一天只做一次)
+          const lastAutoSync = localStorage.getItem('lastAutoSyncDate');
+          if (hour >= 17 && lastAutoSync !== todayStr && sheetUrlRef.current.trim()) {
+            try {
+              const dataToSync = currentTasks.map(task => {
+                const createDate = new Date(parseInt(task.id)).toLocaleDateString('zh-TW');
+                
+                // 手動計算精確時間 (因為在 setInterval 內無法依賴 React state)
+                let totalSec = task.accumulatedSeconds || 0;
+                if (task.status === 'running' && task.lastStartTime) {
+                  totalSec += Math.floor((nowTime.getTime() - task.lastStartTime) / 1000);
+                }
+                const h = Math.floor(totalSec / 3600);
+                const m = Math.floor((totalSec % 3600) / 60);
+                const s = totalSec % 60;
+                const timeStr = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+                
+                let statusStr = '未開始';
+                if (task.status === 'running') statusStr = '進行中';
+                if (task.status === 'paused') statusStr = '已暫停';
+                if (task.status === 'completed') statusStr = '已完成';
+
+                return { date: createDate, name: task.name, time: timeStr, status: statusStr };
+              });
+
+              const response = await fetch(sheetUrlRef.current, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                body: JSON.stringify(dataToSync)
+              });
+
+              if (response.ok) {
+                localStorage.setItem('lastAutoSyncDate', todayStr);
+                console.log('警衛已於背景自動同步至 Google Sheet');
+              }
+            } catch (error) {
+              console.error('背景自動同步失敗', error);
+            }
+          }
+
+          // 2. 每天 20:00 後，或是發現有「昨天」殘留的任務時，自動清空避免計時暴衝
+          const oldestTaskDate = new Date(parseInt(currentTasks[0].id)).toLocaleDateString('zh-TW');
+          if (hour >= 20 || oldestTaskDate !== todayStr) {
+            setTasks([]); // 清空畫面任務
+            console.log('警衛已自動清空過期或超時的任務');
+          }
+        }, 30000); // 每 30 秒巡邏一次
+        
+        return () => clearInterval(watchman);
+      }, []);
+
+      const calculateTaskSeconds = (task) => {
+        let total = task.accumulatedSeconds || 0;
+        if (task.status === 'running' && task.lastStartTime) {
+          total += Math.floor((now - task.lastStartTime) / 1000);
+        }
+        return total;
+      };
+
+      const addTask = (e) => {
+        e.preventDefault();
+        if (!newTaskName.trim()) return;
+        const newTask = {
+          id: Date.now().toString(),
+          name: newTaskName,
+          status: 'idle', 
+          accumulatedSeconds: 0,
+          lastStartTime: null,
+        };
+        setTasks([...tasks, newTask]);
+        setNewTaskName('');
+      };
+
+      const startTask = (targetId) => {
+        const currentTime = Date.now();
+        setTasks((prevTasks) =>
+          prevTasks.map((task) => {
+            if (task.id === targetId) {
+              return { ...task, status: 'running', lastStartTime: currentTime };
+            }
+            if (task.status === 'running') {
+              const sessionSeconds = Math.floor((currentTime - task.lastStartTime) / 1000);
+              return { 
+                ...task, 
+                status: 'paused', 
+                accumulatedSeconds: (task.accumulatedSeconds || 0) + sessionSeconds,
+                lastStartTime: null
+              };
+            }
+            return task;
+          })
+        );
+      };
+
+      const pauseTask = (id) => {
+        const currentTime = Date.now();
+        setTasks((prevTasks) =>
+          prevTasks.map((task) => {
+            if (task.id === id && task.status === 'running') {
+              const sessionSeconds = Math.floor((currentTime - task.lastStartTime) / 1000);
+              return { 
+                ...task, 
+                status: 'paused', 
+                accumulatedSeconds: (task.accumulatedSeconds || 0) + sessionSeconds,
+                lastStartTime: null
+              };
+            }
+            return task;
+          })
+        );
+      };
+
+      const completeTask = (id) => {
+        const currentTime = Date.now();
+        setTasks((prevTasks) =>
+          prevTasks.map((task) => {
+            if (task.id === id) {
+              let finalSeconds = task.accumulatedSeconds || 0;
+              if (task.status === 'running') {
+                finalSeconds += Math.floor((currentTime - task.lastStartTime) / 1000);
+              }
+              return { 
+                ...task, 
+                status: 'completed', 
+                accumulatedSeconds: finalSeconds,
+                lastStartTime: null
+              };
+            }
+            return task;
+          })
+        );
+      };
+
+      const restartTask = (id) => {
+        setTasks((prevTasks) =>
+          prevTasks.map((task) =>
+            task.id === id ? { ...task, status: 'paused' } : task
+          )
+        );
+      };
+
+      const deleteTask = (id) => {
+        if (window.confirm('確定要刪除這個工作項目嗎？刪除後無法恢復喔！')) {
+          setTasks((prevTasks) => prevTasks.filter((task) => task.id !== id));
+        }
+      };
+
+      const formatTime = (totalSeconds) => {
+        const h = Math.floor(totalSeconds / 3600);
+        const m = Math.floor((totalSeconds % 3600) / 60);
+        const s = totalSeconds % 60;
+        return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+      };
+
+      // 原本的 CSV 匯出保留當作備用方案
+      const exportToCSV = () => {
+        if (tasks.length === 0) {
+          alert('目前沒有任何工作紀錄可以匯出喔！');
+          return;
+        }
+
+        let csvContent = '\uFEFF'; 
+        csvContent += "建立日期,工作項目,總花費時間,狀態\n";
+        
+        tasks.forEach(task => {
+          const createDate = new Date(parseInt(task.id)).toLocaleDateString('zh-TW');
+          const seconds = calculateTaskSeconds(task);
+          const timeStr = formatTime(seconds);
+          let statusStr = '未開始';
+          if (task.status === 'running') statusStr = '進行中';
+          if (task.status === 'paused') statusStr = '已暫停';
+          if (task.status === 'completed') statusStr = '已完成';
+          const safeName = `"${task.name.replace(/"/g, '""')}"`;
+          csvContent += `${createDate},${safeName},${timeStr},${statusStr}\n`;
+        });
+        
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        const today = new Date();
+        const dateString = `${today.getFullYear()}${(today.getMonth()+1).toString().padStart(2, '0')}${today.getDate().toString().padStart(2, '0')}`;
+        
+        link.setAttribute("href", url);
+        link.setAttribute("download", `工作紀錄_${dateString}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      };
+
+      // 新增：雲端同步至 Google Sheet 功能
+      const syncToGoogleSheet = async () => {
+        if (!sheetUrl.trim()) {
+          alert('請先在下方輸入框貼上您的 Google Apps Script 網址喔！');
+          return;
+        }
+        if (tasks.length === 0) {
+          alert('目前沒有任何工作紀錄可以同步！');
+          return;
+        }
+
+        setIsSyncing(true);
+
+        try {
+          // 整理要送出的資料
+          const dataToSync = tasks.map(task => {
+            const createDate = new Date(parseInt(task.id)).toLocaleDateString('zh-TW');
+            const seconds = calculateTaskSeconds(task);
+            const timeStr = formatTime(seconds);
+            let statusStr = '未開始';
+            if (task.status === 'running') statusStr = '進行中';
+            if (task.status === 'paused') statusStr = '已暫停';
+            if (task.status === 'completed') statusStr = '已完成';
+
+            return {
+              date: createDate,
+              name: task.name,
+              time: timeStr,
+              status: statusStr
+            };
+          });
+
+          // 呼叫 Google Apps Script 的 API
+          const response = await fetch(sheetUrl, {
+            method: 'POST',
+            // 使用 text/plain 可以避免麻煩的 CORS 跨域預檢請求問題
+            headers: {
+              'Content-Type': 'text/plain;charset=utf-8',
+            },
+            body: JSON.stringify(dataToSync)
+          });
+
+          if (response.ok) {
+            alert('🎉 同步成功！您的資料已經飛到 Google Sheet 囉！\n(如果不需要保留，可以手動將下方的任務刪除清空)');
+          } else {
+            alert('❌ 同步失敗，請檢查網址是否正確。');
+          }
+        } catch (error) {
+          alert('❌ 發生錯誤，請檢查網路連線或網址：' + error.message);
+        } finally {
+          setIsSyncing(false);
+        }
+      };
+
+      const totalWorkSeconds = tasks.reduce((acc, task) => acc + calculateTaskSeconds(task), 0);
+
+      return (
+        <div className="min-h-screen bg-gray-100 p-4 md:p-8 font-sans">
+          <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col min-h-[80vh]">
+            
+            {/* 頂部標題 */}
+            <div className="bg-blue-600 p-6 text-white text-center">
+              <h1 className="text-2xl font-bold mb-2 flex items-center justify-center gap-2">
+                ⏱️ 我的工作日誌中控台_4
+              </h1>
+              <p className="text-blue-100 mb-4 text-sm sm:text-base">重新整理、關閉網頁都不怕！資料已自動在地端儲存</p>
+              <div className="bg-blue-800/50 rounded-lg py-3 px-6 inline-block shadow-inner">
+                <span className="text-sm text-blue-200 block mb-1">今日累積總工時</span>
+                <span className="text-3xl font-mono font-bold tracking-wider">{formatTime(totalWorkSeconds)}</span>
+              </div>
+            </div>
+
+            <div className="p-4 sm:p-6 flex-grow">
+              {/* 新增任務區 */}
+              <form onSubmit={addTask} className="flex gap-2 mb-6 sm:mb-8">
+                <input
+                  type="text"
+                  value={newTaskName}
+                  onChange={(e) => setNewTaskName(e.target.value)}
+                  placeholder="輸入新的工作項目 (例如: 回覆信件...)"
+                  className="flex-1 border-2 border-gray-200 rounded-lg px-3 sm:px-4 py-3 focus:outline-none focus:border-blue-500 transition-colors text-base sm:text-lg"
+                />
+                <button
+                  type="submit"
+                  disabled={!newTaskName.trim()}
+                  className="bg-blue-600 text-white px-4 sm:px-6 py-3 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 font-bold transition-colors whitespace-nowrap"
+                >
+                  ➕ <span className="hidden sm:inline">新增</span>
+                </button>
+              </form>
+
+              {/* 任務列表 */}
+              <div className="space-y-4">
+                {tasks.length === 0 ? (
+                  <div className="text-center py-12 text-gray-400 border-2 border-dashed border-gray-200 rounded-xl">
+                    <p>目前沒有任務，請在上方輸入並新增！</p>
+                  </div>
+                ) : (
+                  tasks.map((task) => {
+                    const currentTaskSeconds = calculateTaskSeconds(task);
+                    
+                    return (
+                      <div
+                        key={task.id}
+                        className={`relative p-4 rounded-xl border-2 transition-all duration-300 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 ${
+                          task.status === 'running'
+                            ? 'border-blue-500 bg-blue-50 shadow-md transform scale-[1.01]'
+                            : task.status === 'completed'
+                            ? 'border-gray-200 bg-gray-50 opacity-70'
+                            : 'border-gray-200 bg-white hover:border-blue-300'
+                        }`}
+                      >
+                        <div className="flex-1 truncate w-full">
+                      <h3 className={`text-base sm:text-lg font-bold truncate flex items-center ${task.status === 'completed' ? 'line-through text-gray-500' : 'text-gray-800'}`}>
+                        {/* 新增：顯示日期 */}
+                        <span className="text-gray-400 font-medium mr-2 text-sm">
+                          [{new Date(parseInt(task.id)).toLocaleDateString('zh-TW', { month: 'numeric', day: 'numeric' })}]
+                        </span>
+                        <span className="truncate">{task.name}</span>
+                      </h3>
+                      <div className="flex items-center gap-2 mt-2 sm:mt-1">
+                            <span className={`text-xs font-bold px-2 py-1 rounded-full ${
+                              task.status === 'running' ? 'bg-blue-200 text-blue-700 animate-pulse' :
+                              task.status === 'paused' ? 'bg-amber-100 text-amber-700' :
+                              task.status === 'completed' ? 'bg-gray-200 text-gray-600' :
+                              'bg-gray-100 text-gray-500'
+                            }`}>
+                              {task.status === 'running' ? '⏱️ 進行中' :
+                               task.status === 'paused' ? '⏸️ 已暫停' :
+                               task.status === 'completed' ? '✅ 已完成' : '未開始'}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between w-full sm:w-auto gap-4 sm:gap-6 mt-2 sm:mt-0 pt-3 sm:pt-0 border-t sm:border-t-0 border-gray-100">
+                          <div className="text-2xl font-mono font-bold text-gray-700 w-auto sm:w-28 text-left sm:text-right tracking-tight">
+                            {formatTime(currentTaskSeconds)}
+                          </div>
+                          
+                          <div className="flex items-center gap-2">
+                            {task.status !== 'completed' ? (
+                              <>
+                                {task.status === 'running' ? (
+                                  <button onClick={() => pauseTask(task.id)} className="p-2 sm:p-3 bg-amber-100 text-amber-600 hover:bg-amber-200 rounded-full shadow-sm" title="暫停">
+                                    ⏸️
+                                  </button>
+                                ) : (
+                                  <button onClick={() => startTask(task.id)} className="p-2 sm:p-3 bg-blue-100 text-blue-600 hover:bg-blue-200 rounded-full shadow-sm" title="開始/繼續">
+                                    ▶️
+                                  </button>
+                                )}
+                                <button onClick={() => completeTask(task.id)} className="p-2 sm:p-3 bg-green-100 text-green-600 hover:bg-green-200 rounded-full shadow-sm" title="標記完成">
+                                  ✅
+                                </button>
+                              </>
+                            ) : (
+                              <button onClick={() => restartTask(task.id)} className="px-3 py-2 bg-gray-200 text-gray-600 hover:bg-gray-300 rounded-lg flex items-center gap-1 text-sm font-bold shadow-sm">
+                                🔄 繼續
+                              </button>
+                            )}
+                            
+                            <button onClick={() => deleteTask(task.id)} className="p-2 sm:p-3 bg-red-50 text-red-500 hover:bg-red-200 hover:text-red-700 rounded-full ml-1 sm:ml-2 transition-colors" title="刪除任務">
+                              🗑️
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+            
+            {/* 底部按鈕與雲端同步區塊 */}
+            <div className="bg-gray-50 p-4 sm:p-6 border-t border-gray-200">
+              
+              {/* Google Sheet 同步設定區 */}
+              <div className="mb-6 p-4 bg-white rounded-xl border border-gray-200 shadow-sm">
+                <label className="block text-sm font-bold text-gray-700 mb-2">🔗 雲端備份通道 (Google Apps Script URL)</label>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    value={sheetUrl}
+                    onChange={(e) => setSheetUrl(e.target.value)}
+                    placeholder="請貼上您部署好的 Google 網址..."
+                    className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                  />
+                  <button 
+                    onClick={syncToGoogleSheet}
+                    disabled={isSyncing}
+                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-all flex items-center justify-center gap-2 whitespace-nowrap disabled:opacity-50"
+                  >
+                    {isSyncing ? '⏳ 同步中...' : '☁️ 同步至雲端'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-400 mt-2">※ 網址會自動記錄在您的設備上，不需每次輸入。</p>
+              </div>
+
+              {/* 備用 CSV 下載 */}
+              <div className="text-center">
+                <button 
+                  onClick={exportToCSV}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2 px-6 rounded-lg shadow-md transition-all inline-flex items-center justify-center gap-2 text-sm"
+                >
+                  📥 備用：下載為 CSV 檔
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
