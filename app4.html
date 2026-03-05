@@ -96,7 +96,15 @@
                 if (task.status === 'paused') statusStr = '已暫停';
                 if (task.status === 'completed') statusStr = '已完成';
 
-                return { date: createDate, name: task.name, time: timeStr, status: statusStr };
+                // 加入 startTime 與 endTime
+                return { 
+                  date: createDate, 
+                  name: task.name, 
+                  startTime: task.firstStartTime || '--:--',
+                  endTime: task.finalEndTime || '--:--',
+                  time: timeStr, 
+                  status: statusStr 
+                };
               });
 
               const response = await fetch(sheetUrlRef.current, {
@@ -142,6 +150,8 @@
           status: 'idle', 
           accumulatedSeconds: 0,
           lastStartTime: null,
+          firstStartTime: null, // 記錄第一次按下開始的時間
+          finalEndTime: null    // 記錄按下完成的時間
         };
         setTasks([...tasks, newTask]);
         setNewTaskName('');
@@ -149,10 +159,18 @@
 
       const startTask = (targetId) => {
         const currentTime = Date.now();
+        const timeString = new Date().toLocaleTimeString('zh-TW', { hour12: false }); // 取得 24 小時制時間，例如 14:30:00
+
         setTasks((prevTasks) =>
           prevTasks.map((task) => {
             if (task.id === targetId) {
-              return { ...task, status: 'running', lastStartTime: currentTime };
+              return { 
+                ...task, 
+                status: 'running', 
+                lastStartTime: currentTime,
+                // 如果是第一次按開始，就記錄下當前時間；如果已經有記錄過了，就保留原本的
+                firstStartTime: task.firstStartTime || timeString 
+              };
             }
             if (task.status === 'running') {
               const sessionSeconds = Math.floor((currentTime - task.lastStartTime) / 1000);
@@ -188,6 +206,8 @@
 
       const completeTask = (id) => {
         const currentTime = Date.now();
+        const timeString = new Date().toLocaleTimeString('zh-TW', { hour12: false }); // 取得完成當下的時間
+
         setTasks((prevTasks) =>
           prevTasks.map((task) => {
             if (task.id === id) {
@@ -199,7 +219,8 @@
                 ...task, 
                 status: 'completed', 
                 accumulatedSeconds: finalSeconds,
-                lastStartTime: null
+                lastStartTime: null,
+                finalEndTime: timeString // 記錄結束時間
               };
             }
             return task;
@@ -210,7 +231,11 @@
       const restartTask = (id) => {
         setTasks((prevTasks) =>
           prevTasks.map((task) =>
-            task.id === id ? { ...task, status: 'paused' } : task
+            task.id === id ? { 
+              ...task, 
+              status: 'paused',
+              finalEndTime: null // 如果重新啟動任務，就把原本的結束時間清空
+            } : task
           )
         );
       };
@@ -236,7 +261,8 @@
         }
 
         let csvContent = '\uFEFF'; 
-        csvContent += "建立日期,工作項目,總花費時間,狀態\n";
+        // 標題列新增 開始時間 與 結束時間
+        csvContent += "建立日期,工作項目,開始時間,結束時間,總花費時間,狀態\n";
         
         tasks.forEach(task => {
           const createDate = new Date(parseInt(task.id)).toLocaleDateString('zh-TW');
@@ -247,7 +273,11 @@
           if (task.status === 'paused') statusStr = '已暫停';
           if (task.status === 'completed') statusStr = '已完成';
           const safeName = `"${task.name.replace(/"/g, '""')}"`;
-          csvContent += `${createDate},${safeName},${timeStr},${statusStr}\n`;
+          
+          const startStr = task.firstStartTime || '--:--';
+          const endStr = task.finalEndTime || '--:--';
+
+          csvContent += `${createDate},${safeName},${startStr},${endStr},${timeStr},${statusStr}\n`;
         });
         
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -290,6 +320,8 @@
             return {
               date: createDate,
               name: task.name,
+              startTime: task.firstStartTime || '--:--', // 加入傳送封包
+              endTime: task.finalEndTime || '--:--',     // 加入傳送封包
               time: timeStr,
               status: statusStr
             };
@@ -326,7 +358,7 @@
             {/* 頂部標題 */}
             <div className="bg-blue-600 p-6 text-white text-center">
               <h1 className="text-2xl font-bold mb-2 flex items-center justify-center gap-2">
-                ⏱️ 我的工作日誌中控台_4
+                ⏱️ 我的工作日誌中控台
               </h1>
               <p className="text-blue-100 mb-4 text-sm sm:text-base">重新整理、關閉網頁都不怕！資料已自動在地端儲存</p>
               <div className="bg-blue-800/50 rounded-lg py-3 px-6 inline-block shadow-inner">
@@ -376,14 +408,15 @@
                         }`}
                       >
                         <div className="flex-1 truncate w-full">
-                      <h3 className={`text-base sm:text-lg font-bold truncate flex items-center ${task.status === 'completed' ? 'line-through text-gray-500' : 'text-gray-800'}`}>
-                        {/* 新增：顯示日期 */}
-                        <span className="text-gray-400 font-medium mr-2 text-sm">
-                          [{new Date(parseInt(task.id)).toLocaleDateString('zh-TW', { month: 'numeric', day: 'numeric' })}]
-                        </span>
-                        <span className="truncate">{task.name}</span>
-                      </h3>
-                      <div className="flex items-center gap-2 mt-2 sm:mt-1">
+                          <h3 className={`text-base sm:text-lg font-bold truncate flex items-center ${task.status === 'completed' ? 'line-through text-gray-500' : 'text-gray-800'}`}>
+                            <span className="text-gray-400 font-medium mr-2 text-sm">
+                              [{new Date(parseInt(task.id)).toLocaleDateString('zh-TW', { month: 'numeric', day: 'numeric' })}]
+                            </span>
+                            <span className="truncate">{task.name}</span>
+                          </h3>
+                          
+                          {/* 狀態標籤與時間區塊 */}
+                          <div className="flex items-center gap-3 mt-2 sm:mt-1">
                             <span className={`text-xs font-bold px-2 py-1 rounded-full ${
                               task.status === 'running' ? 'bg-blue-200 text-blue-700 animate-pulse' :
                               task.status === 'paused' ? 'bg-amber-100 text-amber-700' :
@@ -394,6 +427,12 @@
                                task.status === 'paused' ? '⏸️ 已暫停' :
                                task.status === 'completed' ? '✅ 已完成' : '未開始'}
                             </span>
+                            
+                            {/* 新增：顯示開始與結束時間的標籤 */}
+                            <div className="text-xs text-gray-500 font-mono flex gap-2">
+                              {task.firstStartTime && <span>開始: {task.firstStartTime}</span>}
+                              {task.finalEndTime && <span>結束: {task.finalEndTime}</span>}
+                            </div>
                           </div>
                         </div>
 
