@@ -124,7 +124,7 @@
 
           // 2. 每天 20:00 後，或是發現有「昨天」殘留的任務時，自動清空避免計時暴衝
           const oldestTaskDate = new Date(parseInt(currentTasks[0].id)).toLocaleDateString('zh-TW');
-          if (hour >= 20 || oldestTaskDate !== todayStr) {
+          if (hour >= 23 || oldestTaskDate !== todayStr) {
             setTasks([]); // 清空畫面任務
             console.log('警衛已自動清空過期或超時的任務');
           }
